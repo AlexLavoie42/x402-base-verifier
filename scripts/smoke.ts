@@ -1,24 +1,26 @@
 /**
- * Live smoke test (read-only): proves the full x402 loop against real Base
- * data without spending anything — the "payment" is signed by a throwaway
- * dev key holding no funds; the prototype only VERIFIES the signature
- * (local and free) and serves the verdict. No transaction is ever created.
+ * Live smoke test (read-only): proves the x402 v2 loop end to end against
+ * real Base data without spending anything.
  *
- * Steps:
- *   1. start the app with real public-RPC verdict clients
+ *   1. start the app with real public-RPC verdict clients and the LOCAL
+ *      facilitator (offline; the production server instead uses Coinbase's
+ *      hosted facilitator, which would reject a throwaway key's zero balance)
  *   2. find a recent real USDC transfer on Base (read-only getLogs)
- *   3. GET /verify unpaid         -> expect 402 challenge
- *   4. GET /verify with X-PAYMENT -> expect 200 + real verdict
- *                                    + X-PAYMENT-RESPONSE header
+ *   3. GET /verify unpaid          -> expect 402 + PAYMENT-REQUIRED header
+ *      (base64 PaymentRequired, x402Version 2)
+ *   4. GET /verify with PAYMENT-SIGNATURE -> expect 200 + real verdict
+ *      + PAYMENT-RESPONSE header (settlement is the local facilitator's
+ *      SYNTHETIC receipt — no transaction is ever created or broadcast)
  *
  * Run: npx tsx scripts/smoke.ts
  */
 import { createPublicClient, http } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { DEFAULT_RPC_URLS, USDC } from "../src/config.js";
-import { buildTypedData } from "../src/x402.js";
+import { toHex } from "viem";
+import { CHAIN_ID, DEFAULT_RPC_URLS, USDC, loadConfig } from "../src/config.js";
+import { TRANSFER_WITH_AUTHORIZATION_TYPES } from "../src/x402.js";
 import { makeRpcClients, TRANSFER_TOPIC } from "../src/verdict.js";
-import { loadConfig } from "../src/config.js";
+import { createLocalFacilitator } from "../src/local-facilitator.js";
 import { createApp } from "../src/server.js";
 
 async function main() {
@@ -26,10 +28,12 @@ async function main() {
   const app = createApp({
     config: cfg,
     clients: makeRpcClients(DEFAULT_RPC_URLS),
+    facilitator: createLocalFacilitator(), // offline stand-in; see header comment
     log: (m) => console.log("  [server]", m),
   });
-  await new Promise<void>((r) => app.listen(0, "127.0.0.1", r));
-  const addr = app.address();
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((r) => server.once("listening", r));
+  const addr = server.address();
   if (addr === null || typeof addr === "string") throw new Error("no port");
   const base = `http://127.0.0.1:${addr.port}`;
 
@@ -53,46 +57,81 @@ async function main() {
   if (!logs.length) throw new Error("no recent USDC transfers found in the last 20 blocks; rerun");
   const demo = logs[0]!;
   const demoTo = demo.args.to as string;
-  const demoValue = demo.args.value as bigint;
-  console.log(`demo tx: ${demo.transactionHash} (USDC -> ${demoTo}, ${demoValue} atomic)`);
+  console.log(`demo tx: ${demo.transactionHash} (USDC -> ${demoTo})`);
 
   const query = `/verify?tx=${demo.transactionHash}&to=${demoTo}&min=0.000001&token=usdc`;
 
-  // 1) unpaid -> 402
+  // 1) unpaid -> 402 + PAYMENT-REQUIRED header
   const unpaid = await fetch(`${base}${query}`);
-  const challenge = (await unpaid.json()) as { accepts: Array<Record<string, string>> };
+  const challenge = JSON.parse(
+    Buffer.from(unpaid.headers.get("payment-required") ?? "", "base64").toString("utf-8"),
+  ) as {
+    x402Version: number;
+    resource: unknown;
+    accepts: Array<{
+      scheme: string;
+      network: string;
+      asset: string;
+      amount: string;
+      payTo: string;
+      maxTimeoutSeconds: number;
+      extra: { name?: string; version?: string };
+    }>;
+  };
   console.log(`\n1) unpaid  -> HTTP ${unpaid.status} ${unpaid.status === 402 ? "(challenge)" : "(UNEXPECTED)"}`);
-  console.log("   accepts[0]:", JSON.stringify(challenge.accepts?.[0]));
-  if (unpaid.status !== 402) throw new Error("expected 402");
+  console.log("   PAYMENT-REQUIRED accepts[0]:", JSON.stringify(challenge.accepts?.[0]));
+  if (unpaid.status !== 402 || challenge.x402Version !== 2) throw new Error("expected a v2 402 challenge");
 
-  // 2) paid with a throwaway dev key -> 200 + verdict
+  // 2) paid with a throwaway dev key -> 200 + verdict + PAYMENT-RESPONSE
   const throwaway = privateKeyToAccount(generatePrivateKey());
   const req = challenge.accepts[0]!;
   const nowSec = Math.floor(Date.now() / 1000);
   const authorization = {
     from: throwaway.address,
-    to: req.payTo!,
-    value: req.maxAmountRequired!,
-    validAfter: String(nowSec - 60),
-    validBefore: String(nowSec + Number(req.maxTimeoutSeconds)),
-    nonce: "0x" + Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex"),
+    to: req.payTo as `0x${string}`,
+    value: req.amount,
+    validAfter: "0",
+    validBefore: String(nowSec + req.maxTimeoutSeconds),
+    nonce: toHex(Math.floor(Math.random() * 2 ** 48), { size: 32 }),
   };
-  const signature = await throwaway.signTypedData(buildTypedData(authorization));
-  const header = Buffer.from(
-    JSON.stringify({ x402Version: 1, scheme: "exact", network: "base", payload: { signature, authorization } }),
-    "utf-8"
+  const signature = await throwaway.signTypedData({
+    domain: {
+      name: req.extra.name!,
+      version: req.extra.version!,
+      chainId: CHAIN_ID,
+      verifyingContract: req.asset as `0x${string}`,
+    },
+    types: TRANSFER_WITH_AUTHORIZATION_TYPES,
+    primaryType: "TransferWithAuthorization",
+    message: {
+      from: authorization.from,
+      to: authorization.to,
+      value: BigInt(authorization.value),
+      validAfter: BigInt(authorization.validAfter),
+      validBefore: BigInt(authorization.validBefore),
+      nonce: authorization.nonce,
+    },
+  });
+  const paymentHeader = Buffer.from(
+    JSON.stringify({
+      x402Version: 2,
+      resource: challenge.resource,
+      accepted: req,
+      payload: { signature, authorization },
+    }),
+    "utf-8",
   ).toString("base64");
 
-  const paid = await fetch(`${base}${query}`, { headers: { "X-PAYMENT": header } });
+  const paid = await fetch(`${base}${query}`, { headers: { "PAYMENT-SIGNATURE": paymentHeader } });
   const verdict = await paid.json();
-  const settlement = JSON.parse(Buffer.from(paid.headers.get("x-payment-response") ?? "", "base64").toString("utf-8"));
+  const receipt = JSON.parse(Buffer.from(paid.headers.get("payment-response") ?? "", "base64").toString("utf-8"));
   console.log(`\n2) paid    -> HTTP ${paid.status} ${paid.status === 200 ? "(served)" : "(UNEXPECTED)"}`);
-  console.log("   verdict  :", JSON.stringify(verdict));
-  console.log("   settlement:", JSON.stringify(settlement));
+  console.log("   verdict   :", JSON.stringify(verdict));
+  console.log("   PAYMENT-RESPONSE:", JSON.stringify(receipt), "(local facilitator — synthetic, nothing broadcast)");
   if (paid.status !== 200) throw new Error("expected 200");
-  console.log("\nSMOKE OK — full 402 -> sign -> 200 loop works against live Base data.");
+  console.log("\nSMOKE OK — v2 402 (PAYMENT-REQUIRED header) -> sign -> 200 loop works against live Base data.");
 
-  app.close();
+  server.close();
 }
 
 main().catch((e) => {

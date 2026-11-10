@@ -4,12 +4,14 @@
  * The one fact everything hinges on: the EIP-712 domain of native USDC on
  * Base is { name: "USD Coin", version: "2", chainId: 8453 }. This is
  * confirmed against the live contract by `npm run domain-check` (read-only
- * DOMAIN_SEPARATOR() comparison) and matches the official x402
- * chain config (coinbase/x402, types/shared/evm/config.ts).
+ * DOMAIN_SEPARATOR() comparison) and matches the official x402 v2 SDK
+ * default-asset table (@x402/evm mechanisms/evm/src/defaultAssets.ts).
  */
 
 export const CHAIN_ID = 8453;
-export const NETWORK = "base"; // x402 network identifier for Base mainnet
+export const NETWORK = "base"; // legacy v1 network identifier (src/x402.ts library)
+/** x402 v2 CAIP-2 network identifier for Base mainnet. */
+export const NETWORK_CAIP = "eip155:8453" as const;
 export const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 export const USDC_DECIMALS = 6;
 export const ETH_DECIMALS = 18;
@@ -24,6 +26,17 @@ export const DEFAULT_PRICE_ATOMIC = 10_000n;
 export const MAX_TIMEOUT_SECONDS = 30;
 
 export const RESOURCE_PATH = "/verify";
+
+/**
+ * Coinbase's hosted facilitator (the SDK's own default). NOTE: as of 2026-11
+ * it does NOT support Base mainnet (eip155:8453) — only Base Sepolia and some
+ * non-EVM chains — which is why the default here is the in-process verify-only
+ * facilitator and this URL is only used when FACILITATOR_URL is set explicitly.
+ */
+export const DEFAULT_FACILITATOR_URL = "https://x402.org/facilitator";
+
+export const SERVICE_NAME = "base-payment-verification";
+export const SERVICE_TAGS = ["base", "usdc", "payments", "verification", "x402"];
 
 export const SERVICE_DESCRIPTION =
   "Base payment verification: did transaction 0x… transfer >= X USDC (or ETH) to address 0x…? Structured verdict over public Base RPCs.";
@@ -46,6 +59,12 @@ export interface EndpointConfig {
   priceAtomic: bigint;
   payTo: `0x${string}`;
   maxTimeoutSeconds: number;
+  /**
+   * x402 v2 facilitator base URL (verify/settle/supported), or null to use the
+   * in-process verify-only facilitator (the receive-only default — see
+   * src/local-facilitator.ts for why the hosted default doesn't fit).
+   */
+  facilitatorUrl: string | null;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): EndpointConfig {
@@ -57,6 +76,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): EndpointConfig
   if (priceAtomic < 1n) throw new Error("PRICE_ATOMIC must be a positive integer (atomic USDC units)");
   const payTo = (env.PAY_TO ?? DEFAULT_PAY_TO) as `0x${string}`;
   if (!/^0x[0-9a-fA-F]{40}$/.test(payTo)) throw new Error("PAY_TO must be a 0x… 20-byte address");
+  const facilitatorUrl = env.FACILITATOR_URL ? env.FACILITATOR_URL.replace(/\/+$/, "") : null;
+  if (facilitatorUrl !== null && !/^https?:\/\//.test(facilitatorUrl)) {
+    throw new Error("FACILITATOR_URL must be an HTTP(S) URL");
+  }
   return {
     port,
     baseUrl: (env.BASE_URL ?? `http://localhost:${port}`).replace(/\/+$/, ""),
@@ -64,5 +87,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): EndpointConfig
     priceAtomic,
     payTo,
     maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+    facilitatorUrl,
   };
 }

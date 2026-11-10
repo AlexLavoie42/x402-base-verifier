@@ -27,12 +27,16 @@ const ERC3009_STATE_ABI = [
   },
 ] as const;
 
+/**
+ * Read-only authorizationState checker keyed by (authorizer, nonce) — the
+ * shape the local facilitator's optional settlement check wants.
+ */
 export function makeRpcSettlementCheck(
   rpcUrls: string[],
   usdc: `0x${string}`
-): (auth: Authorization) => Promise<OnChainCheckResult> {
+): (from: string, nonce: string) => Promise<OnChainCheckResult> {
   const clients = rpcUrls.map((url) => createPublicClient({ transport: http(url) }));
-  return async (auth) => {
+  return async (from, nonce) => {
     const errors: string[] = [];
     for (const client of clients) {
       try {
@@ -40,7 +44,7 @@ export function makeRpcSettlementCheck(
           address: usdc,
           abi: ERC3009_STATE_ABI,
           functionName: "authorizationState",
-          args: [getAddress(auth.from), auth.nonce as `0x${string}`],
+          args: [getAddress(from), nonce as `0x${string}`],
         })) as boolean;
         return { checked: true, settled: state };
       } catch (e) {
@@ -49,4 +53,13 @@ export function makeRpcSettlementCheck(
     }
     return { checked: false, settled: false, detail: `authorizationState unreachable: ${errors.join(" | ")}` };
   };
+}
+
+/** Authorization-shaped adapter (legacy signature kept for library users). */
+export function makeAuthorizationSettlementCheck(
+  rpcUrls: string[],
+  usdc: `0x${string}`
+): (auth: Authorization) => Promise<OnChainCheckResult> {
+  const check = makeRpcSettlementCheck(rpcUrls, usdc);
+  return (auth) => check(auth.from, auth.nonce);
 }
