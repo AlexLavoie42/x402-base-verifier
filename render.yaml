@@ -4,8 +4,8 @@ services:
     runtime: node
     plan: free
     region: oregon
-    buildCommand: npm ci
-    startCommand: npm start
+    buildCommand: npm ci --include=dev && npx tsc -p tsconfig.json
+    startCommand: node dist/src/server-main.js
     healthCheckPath: /health
     autoDeploy: true
     envVars:
