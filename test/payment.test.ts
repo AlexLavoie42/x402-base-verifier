@@ -20,13 +20,14 @@ import {
   type PaymentPayload,
 } from "../src/x402.js";
 import { createReplayCache, verifyPayment, stubSettlementCheck } from "../src/payment.js";
-import { DEFAULT_PRICE_ATOMIC, DEFAULT_PAY_TO, USDC, type EndpointConfig } from "../src/config.js";
+import { DEFAULT_PRICE_ATOMIC, DEFAULT_SCAN_PRICE_ATOMIC, DEFAULT_PAY_TO, USDC, type EndpointConfig } from "../src/config.js";
 
 const cfg: EndpointConfig = {
   port: 0,
   baseUrl: "https://proto.example",
   rpcUrls: [],
   priceAtomic: DEFAULT_PRICE_ATOMIC,
+  scanPriceAtomic: DEFAULT_SCAN_PRICE_ATOMIC,
   payTo: DEFAULT_PAY_TO as `0x${string}`,
   maxTimeoutSeconds: 30,
   facilitatorUrl: "http://facilitator.invalid", // library tests never contact a facilitator

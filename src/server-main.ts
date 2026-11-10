@@ -1,7 +1,7 @@
 /**
  * Runnable entry: `npm start` (tsx). Local prototype — do NOT deploy as-is.
- * Env: PORT, BASE_URL, RPC_URLS, PRICE_ATOMIC, PAY_TO, FACILITATOR_URL
- * (see src/config.ts).
+ * Env: PORT, BASE_URL, RPC_URLS, PRICE_ATOMIC, SCAN_PRICE_ATOMIC, PAY_TO,
+ * FACILITATOR_URL (see src/config.ts).
  *
  * Facilitator wiring (the middleware's standard verification path):
  *   - default: in-process verify-only facilitator — full EIP-3009 verification
@@ -36,6 +36,7 @@ const app = createApp({
 app.listen(cfg.port, () => {
   console.log(`x402-endpoint v2 (Base payment verification) listening on http://localhost:${cfg.port}`);
   console.log(`  price       : ${cfg.priceAtomic} atomic USDC per /verify call`);
+  console.log(`  scan price  : ${cfg.scanPriceAtomic} atomic USDC per POST /scan call (Solidity pre-audit)`);
   console.log(`  payTo       : ${cfg.payTo}`);
   console.log(
     cfg.facilitatorUrl !== null

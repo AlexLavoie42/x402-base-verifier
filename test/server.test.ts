@@ -20,7 +20,7 @@ import { encodeAbiParameters, toHex } from "viem";
 import { createApp } from "../src/server.js";
 import { createLocalFacilitator } from "../src/local-facilitator.js";
 import { TRANSFER_TOPIC, type VerdictClient } from "../src/verdict.js";
-import { CHAIN_ID, DEFAULT_PAY_TO, DEFAULT_PRICE_ATOMIC, USDC, type EndpointConfig } from "../src/config.js";
+import { CHAIN_ID, DEFAULT_PAY_TO, DEFAULT_PRICE_ATOMIC, DEFAULT_SCAN_PRICE_ATOMIC, USDC, type EndpointConfig } from "../src/config.js";
 import { TRANSFER_WITH_AUTHORIZATION_TYPES } from "../src/x402.js";
 
 const cfg: EndpointConfig = {
@@ -28,6 +28,7 @@ const cfg: EndpointConfig = {
   baseUrl: "https://proto.example",
   rpcUrls: [],
   priceAtomic: DEFAULT_PRICE_ATOMIC,
+  scanPriceAtomic: DEFAULT_SCAN_PRICE_ATOMIC,
   payTo: DEFAULT_PAY_TO as `0x${string}`,
   maxTimeoutSeconds: 30,
   facilitatorUrl: "http://facilitator.invalid", // never contacted: local facilitator injected

@@ -22,10 +22,24 @@ export const DEFAULT_PAY_TO = "0x696344061b0f4CcFbA0b48a8390330C6b2525531";
 /** Start price: 10000 atomic USDC = $0.01 (USDC has 6 decimals). */
 export const DEFAULT_PRICE_ATOMIC = 10_000n;
 
+/**
+ * Scan price: 100000 atomic USDC = $1.00 — deeper per-request work than the
+ * $0.01 /verify verdict, so the /scan route carries its own price (per-route
+ * configurable via SCAN_PRICE_ATOMIC).
+ */
+export const DEFAULT_SCAN_PRICE_ATOMIC = 100_000n;
+
 /** How long a signed EIP-3009 authorization may remain valid (challenge field). */
 export const MAX_TIMEOUT_SECONDS = 30;
 
 export const RESOURCE_PATH = "/verify";
+export const SCAN_PATH = "/scan";
+
+/** Free-reject thresholds for POST /scan (the body is JSON, sources are raw text). */
+export const SCAN_MAX_SOURCE_BYTES = 200 * 1024; // ~200 KB of Solidity source total
+export const SCAN_MAX_FILES = 200;
+/** JSON body parser limit for /scan: room for 200 KB of escaped source + envelope. */
+export const SCAN_JSON_LIMIT = "1mb";
 
 /**
  * Coinbase's hosted facilitator (the SDK's own default). NOTE: as of 2026-11
@@ -40,6 +54,12 @@ export const SERVICE_TAGS = ["base", "usdc", "payments", "verification", "x402"]
 
 export const SERVICE_DESCRIPTION =
   "Base payment verification: did transaction 0x… transfer >= X USDC (or ETH) to address 0x…? Structured verdict over public Base RPCs.";
+
+export const SCAN_SERVICE_NAME = "solidity-pre-audit-scanner";
+export const SCAN_SERVICE_TAGS = ["solidity", "security", "audit", "smart-contracts", "x402"];
+
+export const SCAN_SERVICE_DESCRIPTION =
+  "Solidity pre-audit scanner: 28 deterministic pattern rules (reentrancy shapes, ERC4626 share inflation, proxy-initialization pitfalls, oracle staleness, weak randomness, unsafe casts, ...) with severity, confidence and line numbers. Fully offline; no compiler, no network.";
 
 /**
  * Public-RPC fallback list with the quirks learned in the field
@@ -57,6 +77,8 @@ export interface EndpointConfig {
   baseUrl: string; // advertised resource origin, e.g. https://api.example.com
   rpcUrls: string[];
   priceAtomic: bigint;
+  /** Separate price for POST /scan (default 100000 atomic = $1.00). */
+  scanPriceAtomic: bigint;
   payTo: `0x${string}`;
   maxTimeoutSeconds: number;
   /**
@@ -74,6 +96,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): EndpointConfig
   if (!rpcUrls.length || rpcUrls.some((s) => !/^https?:\/\//.test(s))) throw new Error("RPC_URLS must contain HTTP(S) URLs");
   const priceAtomic = BigInt(env.PRICE_ATOMIC ?? DEFAULT_PRICE_ATOMIC);
   if (priceAtomic < 1n) throw new Error("PRICE_ATOMIC must be a positive integer (atomic USDC units)");
+  const scanPriceAtomic = BigInt(env.SCAN_PRICE_ATOMIC ?? DEFAULT_SCAN_PRICE_ATOMIC);
+  if (scanPriceAtomic < 1n) throw new Error("SCAN_PRICE_ATOMIC must be a positive integer (atomic USDC units)");
   const payTo = (env.PAY_TO ?? DEFAULT_PAY_TO) as `0x${string}`;
   if (!/^0x[0-9a-fA-F]{40}$/.test(payTo)) throw new Error("PAY_TO must be a 0x… 20-byte address");
   const facilitatorUrl = env.FACILITATOR_URL ? env.FACILITATOR_URL.replace(/\/+$/, "") : null;
@@ -85,6 +109,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): EndpointConfig
     baseUrl: (env.BASE_URL ?? `http://localhost:${port}`).replace(/\/+$/, ""),
     rpcUrls,
     priceAtomic,
+    scanPriceAtomic,
     payTo,
     maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
     facilitatorUrl,

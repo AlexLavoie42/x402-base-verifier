@@ -9,6 +9,69 @@
 > payments through the middleware's facilitator path. See **MIGRATION.md**
 > for what changed, the in-process verify-only facilitator, and deploy steps.
 
+## POST /scan — Solidity pre-audit scanner ($1.00 per scan, x402 v2)
+
+The second product on the same box: a **deterministic, offline Solidity
+pre-audit scanner** — 28 pattern rules distilled from recurring security
+campaign findings, priced at **100000 atomic USDC = $1.00** (deeper work than
+the $0.01 verify; configure with `SCAN_PRICE_ATOMIC`).
+
+```bash
+curl -X POST https://x402-verifier.onrender.com/scan \
+  -H "content-type: application/json" \
+  -d '{"sources":{"contracts/Vault.sol":"// SPDX-License-Identifier: MIT\npragma solidity 0.8.24;\ncontract Vault { mapping(address=>uint256) public balances; function withdraw(uint256 a) external { require(balances[msg.sender]>=a); (bool s,)=msg.sender.call{value:a}(\"\"); balances[msg.sender]-=a; } }"},"solcVersion":"0.8.24"}'
+# -> 402 + PAYMENT-REQUIRED header; retry with PAYMENT-SIGNATURE to get:
+```
+
+```json
+{
+  "findings": [
+    {
+      "rule": "reentrancy-state-after-external-call",
+      "severity": "high",
+      "confidence": 0.6,
+      "file": "contracts/Vault.sol",
+      "line": 1,
+      "snippet": "(bool s,)=msg.sender.call{value:a}(\"\"); balances[msg.sender]-=a;",
+      "why": "A value-carrying external call ... happens BEFORE storage is updated ...",
+      "fix": "Reorder to checks -> effects -> interactions ... and/or nonReentrant guard."
+    }
+  ],
+  "stats": { "files": 1, "lines": 1, "rules_run": 28, "duration_ms": 2 },
+  "disclaimer": "automated pattern scan; not a substitute for a professional audit",
+  "limitations": ["No compiler or type system: ...", "..."]
+}
+```
+
+Input: `{ "sources": { "<path>": "<Solidity source>" }, "solcVersion"?: "0.8.24" }`,
+up to **~200 KB of source total** (larger/malformed bodies are rejected with a
+free 400 *before* payment is demanded). Output: per-finding `rule / severity
+(critical|high|medium|low|info) / confidence (0-1) / file / line / snippet /
+why / fix`, plus `stats` and the disclaimer. The route declares the same
+Bazaar discovery extension as `/verify` (input + output schemas) so x402
+discovery indexes it.
+
+**Rule families (28 rules)**: reentrancy shapes & CEI ordering, unchecked
+call/transfer results, ERC4626 first-depositor inflation, zero-address
+checks, unbounded user-array loops, block.timestamp/blockhash randomness,
+tx.origin auth, state-variable shadowing (cross-file), ERC20 approve race,
+missing admin events, delegatecall to dynamic targets, selfdestruct remnants,
+proxy-init pitfalls (missing initializer guard / `_disableInitializers` /
+constructor storage writes / immutables in impls), uint downcasts,
+division-before-multiplication, fee-on-transfer assumptions, swap deadlines,
+oracle staleness (latestRoundData without updatedAt / deprecated
+latestAnswer), memory-array push, modifier side effects, unprotected
+privileged functions, floating pragmas, missing SPDX.
+
+**Honest limitations** (also shipped in every response payload): no compiler,
+AST or type system — rules are line/pattern analysis over comment-stripped
+source; safe code can be flagged and unsafe code missed; inheritance is only
+resolved within the submitted files; storage-write/external-call
+classification is heuristic. It is a triage tool that produces verifiable
+leads, never a proof of safety — hence the per-finding confidence and the
+disclaimer. Zero findings ≠ audited.
+
+
 A receive-side **x402 v1** paid endpoint (LOCAL PROTOTYPE — not deployed, not
 listed). It sells one genuinely useful question:
 
@@ -109,12 +172,15 @@ is callable. Rerun it whenever the token contract could have changed.
 ## Layout
 
 ```
-src/config.ts    constants + env (price, payTo, RPC fallback list + quirks)
+src/config.ts    constants + env (per-route prices, payTo, RPC fallback list + quirks)
 src/x402.ts      v1 wire types, 402 challenge builder, header codecs, EIP-712 domain
 src/payment.ts   the 8-step payment gate + replay cache
 src/settlement.ts production read-only authorizationState checker (fallback RPCs)
 src/verdict.ts   the paid product: receipt/tx -> verdict (USDC logs or ETH value)
-src/server.ts    node:http wiring (no framework)
+src/scanner.ts   /scan engine: source normalization + structural pass + report
+src/rules.ts     the 28 pattern rules behind /scan (severity/confidence/why/fix)
+src/server.ts    express wiring: /verify + /scan behind the official x402 v2 middleware
+test/fixtures/   Solidity snippets: one per rule family + 2 clean false-positive controls
 scripts/domain-check.ts  live DOMAIN_SEPARATOR proof (read-only)
 scripts/smoke.ts         live end-to-end 402 -> sign -> 200 demo (read-only RPC)
 ```
@@ -123,13 +189,14 @@ scripts/smoke.ts         live end-to-end 402 -> sign -> 200 demo (read-only RPC)
 
 ```bash
 npm install
-npm test            # 27 tests, offline, ~4 s (throwaway dev keys only)
+npm test            # 75 tests, offline (engine + route + payment; throwaway dev keys only)
 npm run typecheck
-npm start           # http://localhost:3000  (env: PORT, BASE_URL, RPC_URLS, PRICE_ATOMIC, PAY_TO)
+npm start           # http://localhost:3000  (env: PORT, BASE_URL, RPC_URLS, PRICE_ATOMIC, SCAN_PRICE_ATOMIC, PAY_TO)
 npx tsx scripts/smoke.ts   # live loop against real Base data
 ```
 
-Env defaults: price 10000 atomic USDC ($0.01), payTo
+Env defaults: /verify 10000 atomic USDC ($0.01), /scan 100000 atomic USDC
+($1.00), payTo
 `0x696344061b0f4CcFbA0b48a8390330C6b2525531` (the operation's receive-only
 wallet — receiving requires no gas, no transactions, no account creation),
 RPCs `https://base.drpc.org,https://mainnet.base.org` with the public-RPC

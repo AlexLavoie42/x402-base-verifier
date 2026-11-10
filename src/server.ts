@@ -12,6 +12,13 @@
  *                     Query: tx=0x… (required), to=0x… (optional),
  *                            min=0.01 (optional, default 0), token=usdc|eth
  *   POST /verify      same, parameters as a JSON body
+ *   POST /scan        PAID (100000 atomic USDC = $1.00, SCAN_PRICE_ATOMIC) —
+ *                     Solidity pre-audit scanner. JSON body
+ *                     { sources: { "contracts/Foo.sol": "pragma ..." },
+ *                       solcVersion?: "0.8.24" } up to ~200 KB of source;
+ *                     oversized/malformed bodies are rejected with a free 400
+ *                     before payment is demanded. Engine: src/scanner.ts +
+ *                     src/rules.ts (28 deterministic pattern rules, offline).
  *
  * Verification path: facilitator-based, exactly as the SDK intends — the
  * middleware asks the configured facilitator (default Coinbase's hosted
@@ -37,6 +44,12 @@ import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import {
   NETWORK_CAIP,
   RESOURCE_PATH,
+  SCAN_JSON_LIMIT,
+  SCAN_MAX_SOURCE_BYTES,
+  SCAN_PATH,
+  SCAN_SERVICE_DESCRIPTION,
+  SCAN_SERVICE_NAME,
+  SCAN_SERVICE_TAGS,
   SERVICE_DESCRIPTION,
   SERVICE_NAME,
   SERVICE_TAGS,
@@ -45,6 +58,7 @@ import {
 } from "./config.js";
 import { makeRpcClients, parseAmountHuman, checkPayment, type TokenKind, type VerdictClient } from "./verdict.js";
 import { EIP712_NAME, EIP712_VERSION } from "./x402.js";
+import { scanSources, validateScanRequest } from "./scanner.js";
 
 export interface ServerDeps {
   config: EndpointConfig;
@@ -99,6 +113,14 @@ function serviceDescriptor(cfg: EndpointConfig) {
     service: SERVICE_NAME,
     x402Version: 2,
     price: `${cfg.priceAtomic} atomic USDC per /verify call`,
+    scan: {
+      path: SCAN_PATH,
+      method: "POST",
+      price: `${cfg.scanPriceAtomic} atomic USDC per /scan call`,
+      input: { sources: { "contracts/MyToken.sol": "pragma solidity 0.8.24; ..." }, solcVersion: "optional, e.g. 0.8.24" },
+      maxSourceBytes: SCAN_MAX_SOURCE_BYTES,
+      rules: "28 deterministic pattern rules; offline; severity+confidence+line per finding",
+    },
     chain: "base (eip155:8453)",
     asset: USDC,
     payTo: cfg.payTo,
@@ -185,6 +207,75 @@ function verifyRouteConfig(cfg: EndpointConfig, method: "GET" | "POST") {
   };
 }
 
+/** Example scan output (real shape; one representative finding) for the bazaar declaration. */
+const SCAN_OUTPUT_EXAMPLE = {
+  findings: [
+    {
+      rule: "reentrancy-state-after-external-call",
+      severity: "high",
+      confidence: 0.6,
+      file: "contracts/Vault.sol",
+      line: 12,
+      snippet: '(bool sent, ) = msg.sender.call{value: amount}("");',
+      why: "A value-carrying external call (transfer/call{value:}/send) happens BEFORE storage is updated: the callee can re-enter and replay the not-yet-updated state (checks-effects-interactions violation).",
+      fix: "Reorder to checks -> effects -> interactions (write state first, transfer last) and/or apply a nonReentrant guard.",
+    },
+  ],
+  stats: { files: 1, lines: 30, rules_run: 28, duration_ms: 3 },
+  disclaimer: "automated pattern scan; not a substitute for a professional audit",
+};
+
+const SCAN_INPUT_SCHEMA = {
+  properties: {
+    sources: {
+      type: "object",
+      description: "Map of file path -> Solidity source text (max ~200 KB of source total)",
+      additionalProperties: { type: "string" },
+    },
+    solcVersion: { type: "string", description: 'Optional compiler version hint, e.g. "0.8.24"' },
+  },
+  required: ["sources"],
+};
+
+const SCAN_INPUT_EXAMPLE = {
+  sources: {
+    "contracts/Vault.sol":
+      "// SPDX-License-Identifier: MIT\npragma solidity 0.8.24;\n\ncontract Vault {\n    mapping(address => uint256) public balances;\n\n    function withdraw(uint256 amount) external {\n        require(balances[msg.sender] >= amount, \"insufficient\");\n        (bool sent, ) = msg.sender.call{value: amount}(\"\");\n        balances[msg.sender] -= amount;\n    }\n}\n",
+  },
+  solcVersion: "0.8.24",
+};
+
+/** x402 v2 route config for POST /scan (payment option + bazaar discovery declaration). */
+function scanRouteConfig(cfg: EndpointConfig) {
+  return {
+    accepts: {
+      scheme: "exact" as const,
+      // 100000 atomic USDC = $1.00: deeper per-request work than the $0.01 verify.
+      price: {
+        amount: cfg.scanPriceAtomic.toString(),
+        asset: USDC,
+        extra: { name: EIP712_NAME, version: EIP712_VERSION },
+      },
+      network: NETWORK_CAIP,
+      payTo: cfg.payTo,
+      maxTimeoutSeconds: cfg.maxTimeoutSeconds,
+    },
+    resource: `${cfg.baseUrl}${SCAN_PATH}`,
+    description: SCAN_SERVICE_DESCRIPTION,
+    mimeType: "application/json",
+    serviceName: SCAN_SERVICE_NAME,
+    tags: SCAN_SERVICE_TAGS,
+    extensions: {
+      ...declareDiscoveryExtension({
+        bodyType: "json" as const,
+        input: SCAN_INPUT_EXAMPLE,
+        inputSchema: SCAN_INPUT_SCHEMA,
+        output: { example: SCAN_OUTPUT_EXAMPLE },
+      }),
+    },
+  };
+}
+
 /**
  * Request params as URLSearchParams; null when the request is a "bare probe"
  * (GET/HEAD with no query string) that should fall through to the 402 gate.
@@ -224,16 +315,32 @@ export function createApp(deps: ServerDeps): Express {
     next();
   });
 
-  // 2. JSON body parsing for POST /verify, regardless of content-type header
-  //    (the v1 server JSON-parsed the raw body whatever the header said;
-  //    parse failures -> JSON 400 "POST body must be JSON" via the error handler)
-  app.use(express.json({ limit: "64kb", type: () => true }));
+  // 2. JSON body parsing regardless of content-type header (the v1 server
+  //    JSON-parsed the raw body whatever the header said; parse failures ->
+  //    JSON 400 "POST body must be JSON" via the error handler). /scan gets a
+  //    larger limit: its sources can carry ~200 KB of Solidity (the raw-text
+  //    cap is enforced by validateScanRequest; this only bounds the envelope).
+  const jsonVerify = express.json({ limit: "64kb", type: () => true });
+  const jsonScan = express.json({ limit: SCAN_JSON_LIMIT, type: () => true });
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const parser = req.path.replace(/\/+$/, "") === SCAN_PATH ? jsonScan : jsonVerify;
+    parser(req, res, next);
+  });
 
   // 3. Free param validation BEFORE the payment gate (same semantics as v1):
   //    bare request (no arguments) -> next() -> 402 challenge from the middleware;
   //    invalid params WITH arguments -> 400 for free, payment never demanded.
+  //    POST /scan validates the same way: malformed/oversized sources fail
+  //    free with a 400; a well-formed body falls through to the 402 gate.
   app.use((req: Request, res: Response, next: NextFunction) => {
-    if (req.path.replace(/\/+$/, "") !== RESOURCE_PATH) return next();
+    const path = req.path.replace(/\/+$/, "");
+    if (path === SCAN_PATH) {
+      if (req.method !== "POST") return next(); // only POST /scan exists; anything else 404s
+      const problem = validateScanRequest(req.body);
+      if (problem) return sendJson(res, 400, { error: problem });
+      return next();
+    }
+    if (path !== RESOURCE_PATH) return next();
     const params = requestParams(req);
     if (params === null) return next(); // bare probe: let the middleware charge the gate
     const parsed = parseQuery(params);
@@ -248,6 +355,7 @@ export function createApp(deps: ServerDeps): Express {
       {
         "GET /verify": verifyRouteConfig(cfg, "GET"),
         "POST /verify": verifyRouteConfig(cfg, "POST"),
+        "POST /scan": scanRouteConfig(cfg),
       },
       new x402ResourceServer(facilitator).register(NETWORK_CAIP, new ExactEvmScheme()),
     ),
@@ -283,13 +391,28 @@ export function createApp(deps: ServerDeps): Express {
   app.get(RESOURCE_PATH, verdictHandler);
   app.post(RESOURCE_PATH, verdictHandler);
 
+  // 6b. Paid route: the Solidity pre-audit scan (only reached with a verified payment)
+  app.post(SCAN_PATH, (req: Request, res: Response) => {
+    const problem = validateScanRequest(req.body);
+    if (problem) return sendJson(res, 400, { error: problem }); // middleware cancels settlement on 4xx
+    const report = scanSources(req.body as { sources: Record<string, string> });
+    log(`served scan files=${report.stats.files} findings=${report.findings.length} in ${report.stats.duration_ms}ms`);
+    sendJson(res, 200, report);
+  });
+
   // 7. 404 + JSON error handler (body-parse failures etc. stay JSON, like v1)
   app.use((_req: Request, res: Response) => {
-    sendJson(res, 404, { error: "not found", routes: ["/", "/health", RESOURCE_PATH] });
+    sendJson(res, 404, { error: "not found", routes: ["/", "/health", RESOURCE_PATH, `POST ${SCAN_PATH}`] });
   });
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const msg = err instanceof Error && /json|body/i.test(err.message) ? "POST body must be JSON" : "internal server error";
+    const tooLarge =
+      err instanceof Error && ((err as Error & { type?: string }).type === "entity.too.large" || /too large/i.test(err.message));
+    const msg = tooLarge
+      ? `request body too large (JSON envelope limit ${SCAN_JSON_LIMIT}; /scan accepts at most ${SCAN_MAX_SOURCE_BYTES} source bytes)`
+      : err instanceof Error && /json|body/i.test(err.message)
+        ? "POST body must be JSON"
+        : "internal server error";
     if (!res.headersSent) sendJson(res, 400, { error: msg });
   });
 
