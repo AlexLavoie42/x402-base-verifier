@@ -1,0 +1,25 @@
+{
+  "name": "x402-endpoint",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Receive-side x402 paid endpoint prototype: Base payment-verification API behind an HTTP 402 payment gate (USDC on Base, EIP-3009).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx src/server-main.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "domain-check": "tsx scripts/domain-check.ts",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
