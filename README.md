@@ -1,5 +1,14 @@
 # x402-endpoint — Base payment verification, $0.01 per call
 
+> **MIGRATED to x402 v2 (official SDK).** The wire protocol below describes
+> the OLD v1 implementation and is kept for background. The live endpoint now
+> serves the v2 challenge (x402Version 2, PaymentRequired in the
+> `PAYMENT-REQUIRED` response header, payments via `PAYMENT-SIGNATURE`,
+> receipts via `PAYMENT-RESPONSE`) through the official
+> `@x402/express` middleware with the Bazaar discovery extension, and verifies
+> payments through the middleware's facilitator path. See **MIGRATION.md**
+> for what changed, the in-process verify-only facilitator, and deploy steps.
+
 A receive-side **x402 v1** paid endpoint (LOCAL PROTOTYPE — not deployed, not
 listed). It sells one genuinely useful question:
 

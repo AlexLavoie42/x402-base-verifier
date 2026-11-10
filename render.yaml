@@ -11,5 +11,6 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      # BASE_URL is set by Render automatically (https) — see RENDER-DEPLOY.md
+      # Set BASE_URL in the Render dashboard: https://x402-verifier.onrender.com
       # RPC_URLS optional; defaults to the public fallback list in src/config.ts
+      # FACILITATOR_URL optional; unset = in-process verify-only facilitator (see MIGRATION.md)
