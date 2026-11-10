@@ -191,3 +191,15 @@ test("POST /verify with JSON body works behind the same payment gate", async () 
   });
   assert.equal(res.status, 402); // payment gate applies to POST too
 });
+
+test("bare GET without params -> 402 challenge (Bazaar/validator preflight), not a 400", async () => {
+  const res = await fetch(`${baseUrl}/verify`);
+  assert.equal(res.status, 402);
+  const body = (await res.json()) as { accepts: Array<Record<string, unknown>> };
+  assert.ok(Array.isArray(body.accepts) && body.accepts.length! > 0);
+});
+
+test("invalid params WITH arguments still fail free with 400", async () => {
+  const res = await fetch(`${baseUrl}/verify?tx=notahash&to=0x123`);
+  assert.equal(res.status, 400);
+});

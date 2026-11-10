@@ -136,7 +136,11 @@ export function createApp(deps: ServerDeps): http.Server {
           params = url.searchParams;
         }
         const parsed = parseQuery(params);
-        if (!parsed.ok) return send(res, 400, { x402Version: 1, error: parsed.error });
+        // x402/Bazaar preflight convention: a bare GET (no query params) gets the 402
+        // challenge, not a param error — validators and agent probes expect payment
+        // gating to come first. Malformed params WITH arguments still fail free.
+        const isBareProbe = req.method === "GET" && url.searchParams.toString() === "";
+        if (!parsed.ok && !isBareProbe) return send(res, 400, { x402Version: 1, error: parsed.error });
 
         // 2. Payment gate
         const resource = `${cfg.baseUrl}${RESOURCE_PATH}`;
@@ -164,7 +168,13 @@ export function createApp(deps: ServerDeps): http.Server {
           });
         }
 
-        // 3. Paid work: the verdict
+        // 3. Paid work: the verdict (guard: a paid bare probe without params)
+        if (!parsed.ok) {
+          return send(res, 400, {
+            x402Version: 1,
+            error: `payment verified but request params invalid: ${parsed.error}. Required query: tx=0x…, to=0x…, min=<decimal>, token=usdc|eth`,
+          });
+        }
         let verdict;
         try {
           verdict = await checkPayment(clients, parsed.q);
