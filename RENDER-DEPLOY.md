@@ -16,6 +16,22 @@
 4. Smoke-test the 402 challenge (`twak x402 quote` style GET → expects `accepts` with payTo our address).
 5. Production hardening before listing (README §deployment): wire `makeRpcSettlementCheck` fail-closed, persistent replay cache (Render disk or KV), rate-limit the 402 path.
 
+## Facilitator (settlement) — env-only, verified 2026-11-11
+
+Two hosted options, both wired via `src/facilitator-select.ts`:
+
+| Facilitator | `FACILITATOR_URL` | Auth | Chains (live `/supported`) |
+|---|---|---|---|
+| **PayAI** (recommended) | `https://facilitator.payai.network` | **none — no API key** | x402 v2 exact: Base `eip155:8453`, Polygon `eip155:137`, Arbitrum `eip155:42161`, BSC 56, Avalanche 43114, Solana; v1 base/polygon/arbitrum |
+| Coinbase CDP | `https://api.cdp.coinbase.com/platform/v2/x402` | `CDP_API_KEY_ID` + `CDP_API_KEY` (dashboard-created) | Base/Polygon/Arbitrum/Monad/World |
+
+PayAI was probed live without any credentials: `/supported` and `/verify` answer
+without auth (`/verify` with a garbage payload returns 400 `invalid_payment_requirements`,
+not 401). Setting `FACILITATOR_URL=https://facilitator.payai.network` alone — no
+CDP keys — makes every payment verify AND settle on-chain into
+`PAY_TO` on Base mainnet. Evidence: https://facilitator.payai.network/supported ,
+directory: https://docs.x402.org/dev-tools/facilitators.md
+
 ## Then
 
 - List on agentic.market (GitHub OAuth; free) with price $0.01/call.
