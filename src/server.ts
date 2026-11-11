@@ -12,6 +12,10 @@
  *                     Query: tx=0x… (required), to=0x… (optional),
  *                            min=0.01 (optional, default 0), token=usdc|eth
  *   POST /verify      same, parameters as a JSON body
+ *   GET  /scan        bare GET answers the same 402 payment challenge as
+ *                     /verify (GET-preflight indexable by bazaar crawlers —
+ *                     a POST-only route 404s to them and is invisible); a
+ *                     PAID GET without a JSON body gets a clear 400.
  *   POST /scan        PAID (100000 atomic USDC = $1.00, SCAN_PRICE_ATOMIC) —
  *                     Solidity pre-audit scanner. JSON body
  *                     { sources: { "contracts/Foo.sol": "pragma ..." },
@@ -115,7 +119,7 @@ function serviceDescriptor(cfg: EndpointConfig) {
     price: `${cfg.priceAtomic} atomic USDC per /verify call`,
     scan: {
       path: SCAN_PATH,
-      method: "POST",
+      method: "POST (bare GET returns the 402 challenge)",
       price: `${cfg.scanPriceAtomic} atomic USDC per /scan call`,
       input: { sources: { "contracts/MyToken.sol": "pragma solidity 0.8.24; ..." }, solcVersion: "optional, e.g. 0.8.24" },
       maxSourceBytes: SCAN_MAX_SOURCE_BYTES,
@@ -245,8 +249,8 @@ const SCAN_INPUT_EXAMPLE = {
   solcVersion: "0.8.24",
 };
 
-/** x402 v2 route config for POST /scan (payment option + bazaar discovery declaration). */
-function scanRouteConfig(cfg: EndpointConfig) {
+/** x402 v2 route config for /scan (payment option + bazaar discovery declaration). */
+function scanRouteConfig(cfg: EndpointConfig, method: "GET" | "POST") {
   return {
     accepts: {
       scheme: "exact" as const,
@@ -266,12 +270,23 @@ function scanRouteConfig(cfg: EndpointConfig) {
     serviceName: SCAN_SERVICE_NAME,
     tags: SCAN_SERVICE_TAGS,
     extensions: {
-      ...declareDiscoveryExtension({
-        bodyType: "json" as const,
-        input: SCAN_INPUT_EXAMPLE,
-        inputSchema: SCAN_INPUT_SCHEMA,
-        output: { example: SCAN_OUTPUT_EXAMPLE },
-      }),
+      ...declareDiscoveryExtension(
+        method === "GET"
+          ? {
+              // GET: the bazaar/validator preflight probe — challenge only; the
+              // scan input itself only ever travels as a POST JSON body
+              input: SCAN_INPUT_EXAMPLE,
+              inputSchema: SCAN_INPUT_SCHEMA,
+              output: { example: SCAN_OUTPUT_EXAMPLE },
+            }
+          : {
+              // POST: parameters travel as a JSON body
+              bodyType: "json" as const,
+              input: SCAN_INPUT_EXAMPLE,
+              inputSchema: SCAN_INPUT_SCHEMA,
+              output: { example: SCAN_OUTPUT_EXAMPLE },
+            },
+      ),
     },
   };
 }
@@ -332,10 +347,13 @@ export function createApp(deps: ServerDeps): Express {
   //    invalid params WITH arguments -> 400 for free, payment never demanded.
   //    POST /scan validates the same way: malformed/oversized sources fail
   //    free with a 400; a well-formed body falls through to the 402 gate.
+  //    GET /scan skips straight to the payment gate so the bare-probe 402
+  //    challenge answers bazaar/validator GET preflights (POST-only routes
+  //    404 to them and are invisible); other methods 404 as before.
   app.use((req: Request, res: Response, next: NextFunction) => {
     const path = req.path.replace(/\/+$/, "");
     if (path === SCAN_PATH) {
-      if (req.method !== "POST") return next(); // only POST /scan exists; anything else 404s
+      if (req.method !== "POST") return next(); // GET -> 402 gate; anything else 404s
       const problem = validateScanRequest(req.body);
       if (problem) return sendJson(res, 400, { error: problem });
       return next();
@@ -355,7 +373,8 @@ export function createApp(deps: ServerDeps): Express {
       {
         "GET /verify": verifyRouteConfig(cfg, "GET"),
         "POST /verify": verifyRouteConfig(cfg, "POST"),
-        "POST /scan": scanRouteConfig(cfg),
+        "GET /scan": scanRouteConfig(cfg, "GET"),
+        "POST /scan": scanRouteConfig(cfg, "POST"),
       },
       new x402ResourceServer(facilitator).register(NETWORK_CAIP, new ExactEvmScheme()),
     ),
@@ -391,18 +410,23 @@ export function createApp(deps: ServerDeps): Express {
   app.get(RESOURCE_PATH, verdictHandler);
   app.post(RESOURCE_PATH, verdictHandler);
 
-  // 6b. Paid route: the Solidity pre-audit scan (only reached with a verified payment)
-  app.post(SCAN_PATH, (req: Request, res: Response) => {
+  // 6b. Paid route: the Solidity pre-audit scan (only reached with a verified
+  //     payment). POST runs the scan; GET is the paid-bare-probe guard — a
+  //     verified payment with no JSON body gets a clear 400 (the middleware
+  //     then cancels settlement), mirroring /verify's paid-no-params 400.
+  const scanHandler = (req: Request, res: Response): void => {
     const problem = validateScanRequest(req.body);
     if (problem) return sendJson(res, 400, { error: problem }); // middleware cancels settlement on 4xx
     const report = scanSources(req.body as { sources: Record<string, string> });
     log(`served scan files=${report.stats.files} findings=${report.findings.length} in ${report.stats.duration_ms}ms`);
     sendJson(res, 200, report);
-  });
+  };
+  app.post(SCAN_PATH, scanHandler);
+  app.get(SCAN_PATH, scanHandler);
 
   // 7. 404 + JSON error handler (body-parse failures etc. stay JSON, like v1)
   app.use((_req: Request, res: Response) => {
-    sendJson(res, 404, { error: "not found", routes: ["/", "/health", RESOURCE_PATH, `POST ${SCAN_PATH}`] });
+    sendJson(res, 404, { error: "not found", routes: ["/", "/health", RESOURCE_PATH, `${SCAN_PATH} (GET probe → 402, POST to scan)`] });
   });
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

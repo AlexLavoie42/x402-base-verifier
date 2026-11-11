@@ -491,11 +491,39 @@ test("a JSON envelope over the parser limit is rejected free with 400 (too large
   assert.match(body.error ?? "", /too large/i);
 });
 
-test("GET /scan is not a route -> JSON 404", async () => {
+test("bare GET /scan -> 402 challenge (bazaar/validator GET preflight), not a 404", async () => {
   const res = await fetch(`${baseUrl}/scan`);
-  assert.equal(res.status, 404);
+  assert.equal(res.status, 402);
+  const raw = res.headers.get("payment-required");
+  assert.ok(raw, "PAYMENT-REQUIRED header present on the GET probe");
+  const header = JSON.parse(Buffer.from(raw!, "base64").toString("utf-8")) as PaymentRequiredHeader;
+  assert.equal(header.x402Version, 2);
+  const a = header.accepts[0]!;
+  assert.equal(a.scheme, "exact");
+  assert.equal(a.network, "eip155:8453");
+  assert.equal(a.amount, "100000", "the GET probe is priced like a POST scan");
+  assert.equal(a.payTo, DEFAULT_PAY_TO);
+  assert.equal((header.resource as { url: string }).url, "https://proto.example/scan");
+  const bazaar = header.extensions?.bazaar as { info?: unknown; schema?: unknown } | undefined;
+  assert.ok(bazaar, "bazaar extension declared on the GET challenge");
+});
+
+test("paid bare GET /scan (payment header, no body) -> clear 400, no report", async () => {
+  const probe = await fetch(`${baseUrl}/scan`);
+  const raw = probe.headers.get("payment-required");
+  assert.ok(raw);
+  const header = JSON.parse(Buffer.from(raw!, "base64").toString("utf8")) as PaymentRequiredHeader;
+  const payment = await signScanPayment(header); // payable against the GET challenge itself
+  const res = await fetch(`${baseUrl}/scan`, { headers: { "PAYMENT-SIGNATURE": payment } });
+  assert.equal(res.status, 400);
   const body = (await res.json()) as { error?: string };
-  assert.equal(body.error, "not found");
+  assert.match(body.error ?? "", /sources|body/i);
+});
+
+test("OPTIONS /scan preflight -> 204 CORS response (same as /verify)", async () => {
+  const res = await fetch(`${baseUrl}/scan`, { method: "OPTIONS" });
+  assert.equal(res.status, 204);
+  assert.equal(res.headers.get("access-control-allow-origin"), "*");
 });
 
 test("full paid flow: 402 -> sign -> 200 scan report + PAYMENT-RESPONSE header", async () => {
