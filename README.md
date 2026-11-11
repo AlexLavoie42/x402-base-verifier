@@ -1,26 +1,106 @@
-# x402-endpoint — Base payment verification, $0.01 per call
+# x402-base-verifier — two x402 v2 pay-per-call API endpoints on Base
 
-> **MIGRATED to x402 v2 (official SDK).** The wire protocol below describes
-> the OLD v1 implementation and is kept for background. The live endpoint now
-> serves the v2 challenge (x402Version 2, PaymentRequired in the
-> `PAYMENT-REQUIRED` response header, payments via `PAYMENT-SIGNATURE`,
-> receipts via `PAYMENT-RESPONSE`) through the official
-> `@x402/express` middleware with the Bazaar discovery extension, and verifies
-> payments through the middleware's facilitator path. See **MIGRATION.md**
-> for what changed, the in-process verify-only facilitator, and deploy steps.
+Live at **https://x402-verifier.onrender.com** — machine-payable via the
+[x402 v2](https://x402.org) protocol (402 challenge → EIP-3009 signature →
+result). No API keys, no accounts: an x402-capable client pays per call and
+gets a structured JSON answer.
 
-## POST /scan — Solidity pre-audit scanner ($1.00 per scan, x402 v2)
+| Endpoint | Method | Price | What you get |
+|---|---|---|---|
+| `/verify` | GET / POST | **$0.01** (10000 atomic USDC, Base) | Did transaction `0x…` transfer ≥ X USDC (or ETH) to address `0x…`? Structured verdict over public Base RPCs. |
+| `/scan` | POST | **$1.00** (100000 atomic USDC, Base) | Solidity pre-audit scan: 28 deterministic exploit-pattern rules over up to ~200 KB of source, each finding with severity / confidence / line / why / fix. |
+| `/` and `/health` | GET | free | Service descriptor / liveness. |
 
-The second product on the same box: a **deterministic, offline Solidity
-pre-audit scanner** — 28 pattern rules distilled from recurring security
-campaign findings, priced at **100000 atomic USDC = $1.00** (deeper work than
-the $0.01 verify; configure with `SCAN_PRICE_ATOMIC`).
+## Try it right now (see the 402 challenge, free)
+
+```bash
+curl -si "https://x402-verifier.onrender.com/verify"
+```
+
+```text
+HTTP/1.1 402 Payment Required
+payment-required: eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJQYXltZW50IHJlcXVpcmVkIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cHM6Ly94NDAyLXZlcmlmaWVyLm9ucmVuZGVyLmNvbS92ZXJpZnkiLCJkZXNjcmlwdGlvbiI6IkJhc2UgcGF5bWVudCB2ZXJpZmljYXRpb246IC4uLiIsInNlcnZpY2VOYW1lIjoiYmFzZS1wYXltZW50LXZlcmlmaWNhdGlvbiIsInRhZ3MiOlsiYmFzZSIsInVzZGMiLCJwYXltZW50cyIsInZlcmlmaWNhdGlvbiIsIng0MDIiXX0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6ImVpcDE1NTo4NDUzIiwiYW1vdW50IjoiMTAwMDAiLCJhc3NldCI6IjB4ODMzNTg5ZkNENmVEYjZFMDhmNGM3QzMyRDRmNzFiNTRiZEEwMjkxMyIsInBheVRvIjoiMHg2OTYzNDQwNjFiMGY0Q2NGYkEwYjQ4YTgzOTAzMzBDNmIyNTI1NTMxIiwibWF4VGltZW91dFNlY29uZHMiOjMwLCJleHRyYSI6eyJuYW1lIjoiVVNEIENvaW4iLCJ2ZXJzaW9uIjoiMiJ9fV0sImV4dGVuc2lvbnMiOnsiYmF6YWFyIjp7Li4ufX19
+{"error":"Payment required"}
+```
+
+The base64 `PAYMENT-REQUIRED` header decodes to the x402 v2 challenge:
+`x402Version: 2`, the resource description, and one `accepts` entry —
+`scheme "exact"`, network `eip155:8453` (Base mainnet), `amount 10000`
+atomic USDC ($0.01), asset `0x8335…2913` (native USDC on Base), `payTo`,
+and a `maxTimeoutSeconds: 30` validity window. The `extensions.bazaar`
+block carries input schema + output example so x402 discovery indexers
+([agentic.market](https://agentic.market)) can catalog the route.
+
+## How an x402-capable client pays
+
+The three-step loop (exactly what any x402 client library automates —
+e.g. the official `x402-fetch` wrapper, or CDP's x402 clients):
+
+1. **Call unpaid → receive the 402.** Decode the `PAYMENT-REQUIRED` header.
+2. **Sign an EIP-3009 `transferWithAuthorization`** over the USDC-on-Base
+   EIP-712 domain (`{ name: "USD Coin", version: "2", chainId: 8453,
+   verifyingContract: 0x8335…2913 }`) with `to = payTo` and
+   `value ≥ 10000`, then build the payment header: base64 of
+   `{ x402Version: 2, scheme: "exact", payload: { signature, authorization } }`.
+3. **Retry with `PAYMENT-SIGNATURE: <that base64>` → 200 + result**
+   (and a `PAYMENT-RESPONSE` receipt header).
+
+A complete working client for this exact loop lives in
+[`scripts/smoke.ts`](scripts/smoke.ts) (throwaway key, read-only RPCs):
+
+```ts
+// sketch of smoke.ts — full runnable version in the repo
+const unpaid = await fetch(`${base}/verify?tx=0x…&to=0x…&min=0.01&token=usdc`);   // 402
+const challenge = JSON.parse(Buffer.from(
+  unpaid.headers.get("payment-required")!, "base64").toString());
+const authorization = buildEip3009Authorization(challenge);        // payTo, amount, 30s window
+const signature = await payer.signTypedData(usdcOnBaseDomain, TRANSFER_WITH_AUTHORIZATION_TYPES, authorization);
+const paymentHeader = Buffer.from(JSON.stringify(
+  { x402Version: 2, scheme: "exact", payload: { signature, authorization } })).toString("base64");
+const paid = await fetch(`${base}/verify?tx=0x…`, { headers: { "PAYMENT-SIGNATURE": paymentHeader } }); // 200
+```
+
+Or with the generic x402 fetch wrapper (no manual signing):
+
+```ts
+import { wrapper } from "x402-fetch";
+const res = await wrapper(fetch)(
+  "https://x402-verifier.onrender.com/verify?tx=0x<hash>&to=0x<addr>&min=0.01&token=usdc",
+  { payer: privateKeyToAccount("0x…") }, // wallet holding USDC on Base
+);
+const verdict = await res.json();
+```
+
+### /verify — arguments
+
+`tx` (required, 0x… 32-byte Base tx hash), `to` (optional recipient
+filter), `min` (optional decimal minimum, default 0), `token`
+(`usdc|eth`, default usdc) — as query params (GET) or a JSON body (POST).
+Invalid arguments are rejected with a free 400 **before** payment is
+demanded; you never pay for an unanswerable request. Real verdict shape:
+
+```json
+{
+  "paid": true, "amount": "11.81", "block": 55749678,
+  "txHash": "0x7153acfd79cd3c7119f096807be6307ba9ef9fab72d505cfa9437806dcd973c9",
+  "from": "0xff9592258b601e0592570295894ba19b505c0257",
+  "token": "usdc", "verifiedAt": "2026-11-10T19:51:55.295Z", "chain": "base",
+  "found": true, "matched": 1, "minRequested": "0.01",
+  "to": "0x870435Ee7bD072bCeD4Ef74b405D7C8a436ea973"
+}
+```
+
+Plausible buyers: agents verifying that *they themselves got paid* on Base
+(closing the loop on x402 flows), CI/automation payment checks — one
+structured HTTP call instead of RPC setup + log decoding.
+
+### POST /scan — Solidity pre-audit scanner ($1.00)
 
 ```bash
 curl -X POST https://x402-verifier.onrender.com/scan \
   -H "content-type: application/json" \
   -d '{"sources":{"contracts/Vault.sol":"// SPDX-License-Identifier: MIT\npragma solidity 0.8.24;\ncontract Vault { mapping(address=>uint256) public balances; function withdraw(uint256 a) external { require(balances[msg.sender]>=a); (bool s,)=msg.sender.call{value:a}(\"\"); balances[msg.sender]-=a; } }"},"solcVersion":"0.8.24"}'
-# -> 402 + PAYMENT-REQUIRED header; retry with PAYMENT-SIGNATURE to get:
+# → 402 + PAYMENT-REQUIRED; retry with PAYMENT-SIGNATURE to get the report:
 ```
 
 ```json
@@ -33,231 +113,90 @@ curl -X POST https://x402-verifier.onrender.com/scan \
       "file": "contracts/Vault.sol",
       "line": 1,
       "snippet": "(bool s,)=msg.sender.call{value:a}(\"\"); balances[msg.sender]-=a;",
-      "why": "A value-carrying external call ... happens BEFORE storage is updated ...",
-      "fix": "Reorder to checks -> effects -> interactions ... and/or nonReentrant guard."
+      "why": "A value-carrying external call happens BEFORE storage is updated …",
+      "fix": "Reorder to checks → effects → interactions … and/or nonReentrant guard."
     }
   ],
   "stats": { "files": 1, "lines": 1, "rules_run": 28, "duration_ms": 2 },
-  "disclaimer": "automated pattern scan; not a substitute for a professional audit",
-  "limitations": ["No compiler or type system: ...", "..."]
+  "disclaimer": "automated pattern scan; not a substitute for a professional audit"
 }
 ```
-
-Input: `{ "sources": { "<path>": "<Solidity source>" }, "solcVersion"?: "0.8.24" }`,
-up to **~200 KB of source total** (larger/malformed bodies are rejected with a
-free 400 *before* payment is demanded). Output: per-finding `rule / severity
-(critical|high|medium|low|info) / confidence (0-1) / file / line / snippet /
-why / fix`, plus `stats` and the disclaimer. The route declares the same
-Bazaar discovery extension as `/verify` (input + output schemas) so x402
-discovery indexes it.
 
 **Rule families (28 rules)**: reentrancy shapes & CEI ordering, unchecked
 call/transfer results, ERC4626 first-depositor inflation, zero-address
 checks, unbounded user-array loops, block.timestamp/blockhash randomness,
-tx.origin auth, state-variable shadowing (cross-file), ERC20 approve race,
-missing admin events, delegatecall to dynamic targets, selfdestruct remnants,
-proxy-init pitfalls (missing initializer guard / `_disableInitializers` /
-constructor storage writes / immutables in impls), uint downcasts,
-division-before-multiplication, fee-on-transfer assumptions, swap deadlines,
-oracle staleness (latestRoundData without updatedAt / deprecated
-latestAnswer), memory-array push, modifier side effects, unprotected
-privileged functions, floating pragmas, missing SPDX.
+tx.origin auth, state-variable shadowing, ERC20 approve race, missing admin
+events, delegatecall to dynamic targets, selfdestruct remnants,
+proxy-init pitfalls, uint downcasts, division-before-multiplication,
+fee-on-transfer assumptions, swap deadlines, oracle staleness
+(latestRoundData/latestAnswer), memory-array push, modifier side effects,
+unprotected privileged functions, floating pragmas, missing SPDX.
 
-**Honest limitations** (also shipped in every response payload): no compiler,
-AST or type system — rules are line/pattern analysis over comment-stripped
-source; safe code can be flagged and unsafe code missed; inheritance is only
-resolved within the submitted files; storage-write/external-call
-classification is heuristic. It is a triage tool that produces verifiable
-leads, never a proof of safety — hence the per-finding confidence and the
-disclaimer. Zero findings ≠ audited.
+**Honest limitations** (shipped in every response): no compiler/AST/type
+system — line/pattern analysis over comment-stripped source; false
+positives and misses both possible; inheritance resolved only within
+submitted files. A triage tool producing verifiable leads, never a proof
+of safety. Zero findings ≠ audited. Buyers who want real depth should
+still hire an auditor — this finds the cheap kills first.
 
+## Honest status box (updated 2026-11-10)
 
-A receive-side **x402 v1** paid endpoint (LOCAL PROTOTYPE — not deployed, not
-listed). It sells one genuinely useful question:
+- **Earnings to date: $0.00.** No paid call has happened yet.
+- **Bazaar indexing**: the route passes Coinbase's official x402 validator
+  (all preflight checks green, simulation `accepted`) and carries full
+  `extensions.bazaar` metadata, but [agentic.market](https://agentic.market)
+  indexing is gated on a first **settled** payment through the CDP
+  facilitator. No submission API or PR process exists — listing is purely
+  automatic ([docs](https://docs.cdp.coinbase.com/x402/seller/get-discovered)).
+- **Settlement posture**: this deploy runs an in-process verify-only
+  facilitator (Coinbase's hosted facilitator does not cover Base mainnet
+  as of 2026-11). Payments are fully validated off-chain — EIP-712
+  signature recovery against the USDC-on-Base domain, payTo/amount/window
+  checks, nonce replay guard, read-only on-chain `authorizationState` —
+  but nothing is ever signed or broadcast by this server. `payTo`
+  receives nothing until a Base-mainnet facilitator is wired
+  (`FACILITATOR_URL`, one env var, no code change).
+- **/scan validation gap**: the validator probes GET by default and
+  `/scan` is POST-only (a bodyless POST is correctly 400'd for free
+  before payment), so `/scan` does not currently pass the standalone
+  validator even though its bazaar metadata is declared. `/verify` does.
 
-> Did transaction `0x…` transfer ≥ X USDC (or ETH) to address `0x…`?
-
-and answers with a structured verdict over public Base RPCs:
-
-```json
-{
-  "paid": true,
-  "amount": "11.81",
-  "block": 55749678,
-  "txHash": "0x7153acfd79cd3c7119f096807be6307ba9ef9fab72d505cfa9437806dcd973c9",
-  "from": "0xff9592258b601e0592570295894ba19b505c0257",
-  "token": "usdc",
-  "verifiedAt": "2026-11-10T19:51:55.295Z",
-  "chain": "base",
-  "found": true,
-  "matched": 1,
-  "minRequested": "0.01",
-  "to": "0x870435Ee7bD072bCeD4Ef74b405D7C8a436ea973"
-}
-```
-
-(that verdict is real output from `npx tsx scripts/smoke.ts`, run against a
-live Base transaction)
-
-## Protocol behavior (x402 v1, HTTP transport, per the official spec)
-
-1. `GET /verify?tx=0x…&to=0x…&min=0.01&token=usdc` without payment →
-   **402** with a challenge body:
-   ```json
-   {
-     "x402Version": 1,
-     "error": "X-PAYMENT header is required",
-     "accepts": [{
-       "scheme": "exact",
-       "network": "base",
-       "maxAmountRequired": "10000",
-       "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-       "payTo": "0x696344061b0f4CcFbA0b48a8390330C6b2525531",
-       "resource": "https://<host>/verify",
-       "description": "Base payment verification: …",
-       "mimeType": "application/json",
-       "outputSchema": null,
-       "maxTimeoutSeconds": 30,
-       "extra": { "name": "USD Coin", "version": "2" }
-     }]
-   }
-   ```
-2. Client signs an **EIP-3009 `transferWithAuthorization`** over the EIP-712
-   domain `{ name: "USD Coin", version: "2", chainId: 8453, verifyingContract:
-   0x8335…2913 }` and retries with `X-PAYMENT` (standard base64 JSON, exactly
-   the shape the official `x402` TS client emits).
-3. Server verifies (below) → **200** + verdict + `X-PAYMENT-RESPONSE`
-   settlement header (base64 `{success, transaction, network, payer}`).
-
-Other routes: `GET /` (free service descriptor), `GET /health` (liveness),
-`POST /verify` (same params as JSON body, same payment gate). Bad query
-params → 400 for free (never take payment for an unanswerable request).
-
-## What the payment gate verifies (`src/payment.ts`)
-
-| # | Check | Where |
-|---|-------|-------|
-| 1 | header decodes (base64 or base64url), right shape | local |
-| 2 | `x402Version` 1, scheme `exact`, network `base` match the challenge | local |
-| 3 | `authorization.to` === our `payTo` | local |
-| 4 | `authorization.value` ≥ `maxAmountRequired` (10000 atomic = $0.01) | local |
-| 5 | `validAfter ≤ now < validBefore` | local |
-| 6 | EIP-712 signature recovers to `authorization.from` against the **USDC-on-Base domain** — recovering against that domain is also what binds the signature to the USDC contract | local |
-| 7 | nonce unseen (in-memory replay cache, TTL = validity window) | local |
-| 8 | `USDC.authorizationState(from, nonce) === false` (EIP-3009 state map) | **RPC — STUBBED by default in the prototype** (`src/settlement.ts` has the real read-only implementation, `makeRpcSettlementCheck`) |
-
-The EIP-712 domain is not folklore: `npm run domain-check` compares the live
-contract's `DOMAIN_SEPARATOR()` against locally computed candidates (read-only
-`eth_call`), proving `"USD Coin"`/`"2"`/8453 matches and `authorizationState`
-is callable. Rerun it whenever the token contract could have changed.
-
-## Prototype honesty box (read before relying on it)
-
-- **No settlement.** The server *verifies* the signed authorization but does
-  not submit it (that needs a gas-paying facilitator account — prohibited for
-  this operation). `X-PAYMENT-RESPONSE.transaction` is `""`. A signed but
-  unclaimed authorization expires harmlessly at `validBefore`.
-- **Check 8 is a stub by default** — wire `makeRpcSettlementCheck(rpcs, USDC)`
-  into `createApp({ paymentDeps: { settlementCheck } })` for the real
-  read-only check. Without it, replay of the *same* nonce at this endpoint is
-  still blocked by check 7; what the stub misses is detecting an auth
-  *already executed on-chain* (an auth settled elsewhere then re-submitted
-  here) — a $0.01 exposure per incident.
-- **Replay cache is in-memory** (per-process). Restart = amnesia within the
-  ≤30 s validity window.
-- **Fail-open on RPC outage for check 8; fail-closed (502) for the verdict
-  itself** — if we can't produce the verdict after taking a payment we say so
-  instead of silently keeping money.
-
-## Layout
+## Repo layout / run / test
 
 ```
-src/config.ts    constants + env (per-route prices, payTo, RPC fallback list + quirks)
-src/x402.ts      v1 wire types, 402 challenge builder, header codecs, EIP-712 domain
-src/payment.ts   the 8-step payment gate + replay cache
-src/settlement.ts production read-only authorizationState checker (fallback RPCs)
-src/verdict.ts   the paid product: receipt/tx -> verdict (USDC logs or ETH value)
-src/scanner.ts   /scan engine: source normalization + structural pass + report
-src/rules.ts     the 28 pattern rules behind /scan (severity/confidence/why/fix)
-src/server.ts    express wiring: /verify + /scan behind the official x402 v2 middleware
-test/fixtures/   Solidity snippets: one per rule family + 2 clean false-positive controls
-scripts/domain-check.ts  live DOMAIN_SEPARATOR proof (read-only)
-scripts/smoke.ts         live end-to-end 402 -> sign -> 200 demo (read-only RPC)
+src/config.ts     constants + env (per-route prices, payTo, RPC fallback list)
+src/server.ts     express wiring: /verify + /scan behind official @x402/express v2 middleware
+src/local-facilitator.ts   in-process verify-only FacilitatorClient (default deploy)
+src/scanner.ts    /scan engine: normalization + structural pass + report
+src/rules.ts      the 28 pattern rules (severity/confidence/why/fix)
+src/verdict.ts    the paid product: receipt/tx → verdict (USDC logs or ETH value)
+test/fixtures/    Solidity snippets: one per rule family + 2 clean false-positive controls
+scripts/smoke.ts  live end-to-end 402 → sign → 200 demo (throwaway key, read-only RPCs)
 ```
-
-## Run
 
 ```bash
 npm install
-npm test            # 75 tests, offline (engine + route + payment; throwaway dev keys only)
+npm test            # offline test suite
 npm run typecheck
-npm start           # http://localhost:3000  (env: PORT, BASE_URL, RPC_URLS, PRICE_ATOMIC, SCAN_PRICE_ATOMIC, PAY_TO)
+npm start           # http://localhost:3000
 npx tsx scripts/smoke.ts   # live loop against real Base data
 ```
 
-Env defaults: /verify 10000 atomic USDC ($0.01), /scan 100000 atomic USDC
-($1.00), payTo
-`0x696344061b0f4CcFbA0b48a8390330C6b2525531` (the operation's receive-only
-wallet — receiving requires no gas, no transactions, no account creation),
-RPCs `https://base.drpc.org,https://mainnet.base.org` with the public-RPC
-quirks documented in `tools/base-watchdog/src/config.ts` (mainnet.base.org
-429s address-less `eth_getLogs`, which this endpoint never does — it only
-reads receipts/transactions).
+Env: `PORT`, `BASE_URL`, `RPC_URLS`, `PRICE_ATOMIC` (default 10000 =
+$0.01), `SCAN_PRICE_ATOMIC` (default 100000 = $1.00), `PAY_TO`
+(`0x696344061b0f4CcFbA0b48a8390330C6b2525531` — the operation's
+receive-only wallet), `FACILITATOR_URL` (unset = in-process facilitator).
 
-## What changes for production (go-live path)
+## Links
 
-1. **Settlement.** Pick one:
-   - *Hosted facilitator*: point at Coinbase's x402 facilitator (`/verify`
-     and `/settle` HTTP APIs per the spec) — it settles for a fee; no gas
-     account of ours needed. Cleanest under the no-transactions charter.
-   - *Self-settling watcher*: an agent-side process submits
-     `transferWithAuthorization` when funded — **prohibited** (transactions).
-   - *Settlement observer only*: `tools/base-watchdog` already watches
-     incoming USDC to `payTo` — keep verification-only serving and treat
-     watchdog alerts as the receipt that payment *actually arrived*;
-     periodically reconcile against `X-PAYMENT` logs. Zero new infra.
-2. **Wire check 8** (`makeRpcSettlementCheck`) and switch it to fail-closed.
-3. **Persistent replay cache** (SQLite or Redis) + small idempotency window.
-4. **TLS + BASE_URL** set to the public origin; add per-IP rate limiting on
-   the 402 path (challenge emission is free and abuse-able).
-5. **Raise the price** once there's evidence anyone wants it; 10000 atomic
-   is a probe price, not a valuation.
-6. Optional: list on agentic.market-style x402 directories.
-
-## Deployment options (free-tier candidates)
-
-The app is a plain Node HTTP server (stateless apart from the replay cache):
-
-| Host | Free tier | Notes |
-|------|-----------|-------|
-| Render (Web Service) | yes (spins down when idle; cold start ~30 s+) | easiest fit; custom domains; `npm start` |
-| Railway | trial credit, then ~$5/mo | best DX; not permanently free |
-| Fly.io | small always-free allowance (credit-based) | needs `flyctl` + account (operator-created) |
-| Cloudflare Workers / Vercel | generous | **requires porting** off `node:http` (Workers-style fetch handler); the x402 logic is portable as-is |
-| Home machine + Cloudflare Tunnel | free | keeps zero-capital, but uptime = desktop uptime |
-
-Hosting-account creation is operator-only (charter: agent may not create
-accounts). Deploying anywhere is explicitly **not** done in this prototype.
-
-## Honest demand assessment
-
-- x402 rails are real (100M+ txs by mid-2026) but traffic skews heavily to
-  agents *spending* with known brands; our own scout evidence
-  (`EVIDENCE/scout-1-agent-income-mechanisms.md`) found new-provider revenue
-  ≈ 0 absent distribution, and only a small fraction of x402 volume looks
-  genuinely agentic.
-- The *service* competes with free: anyone can call a public RPC or read
-  Basescan. What a $0.01 call actually buys is **one structured, agent-native
-  answer** (no RPC setup, no log decoding, one HTTP call with a receipt).
-  Plausible micro-niche: agents verifying that *they themselves got paid*
-  (closing the loop on x402 flows) and CI/automation payment checks.
-- Expected revenue near zero until listed and noticed; marginal cost also
-  ~zero. Treat as a lottery ticket + working reference implementation —
-  consistent with its #4 rank in the scout's mechanism ranking, and with
-  A10 (publishing MIT tooling) it doubles as portfolio evidence for Base
-  Builder Grants.
+- Live service: https://x402-verifier.onrender.com (`GET /` = machine-readable descriptor)
+- x402 protocol: https://x402.org — spec, client libraries, facilitator docs
+- Get discovered (Bazaar): https://docs.cdp.coinbase.com/x402/seller/get-discovered
+- agentic.market: https://agentic.market — Coinbase's public x402 service directory
+- Deployment: Render (`render.yaml`); migration notes in [MIGRATION.md](MIGRATION.md)
 
 ## License
 
-MIT (see LICENSE). Test keys are generated per-run throwaways and discarded;
-the operation's real wallet key never touches this package (read-only RPCs only).
+MIT (see LICENSE). Test keys are generated per-run throwaways and
+discarded; the operation's real wallet key never touches this package
+(read-only RPCs only).
