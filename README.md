@@ -154,8 +154,11 @@ still hire an auditor — this finds the cheap kills first.
   signature recovery against the USDC-on-Base domain, payTo/amount/window
   checks, nonce replay guard, read-only on-chain `authorizationState` —
   but nothing is ever signed or broadcast by this server. `payTo`
-  receives nothing until a Base-mainnet facilitator is wired
-  (`FACILITATOR_URL`, one env var, no code change).
+  receives nothing until a Base-mainnet facilitator is wired — going live
+  is env-vars only: set `FACILITATOR_URL` (e.g. Coinbase CDP
+  `https://api.cdp.coinbase.com/platform/v2/x402`) plus
+  `CDP_API_KEY_ID`/`CDP_API_KEY`, then redeploy; the server then verifies
+  AND settles through the hosted facilitator (see `src/facilitator-select.ts`).
 - **/scan validation gap**: the validator probes GET by default and
   `/scan` is POST-only (a bodyless POST is correctly 400'd for free
   before payment), so `/scan` does not currently pass the standalone
@@ -167,6 +170,7 @@ still hire an auditor — this finds the cheap kills first.
 src/config.ts     constants + env (per-route prices, payTo, RPC fallback list)
 src/server.ts     express wiring: /verify + /scan behind official @x402/express v2 middleware
 src/local-facilitator.ts   in-process verify-only FacilitatorClient (default deploy)
+src/facilitator-select.ts  env-driven facilitator pick: hosted (CDP bearer-JWT auth) vs local + warning
 src/scanner.ts    /scan engine: normalization + structural pass + report
 src/rules.ts      the 28 pattern rules (severity/confidence/why/fix)
 src/verdict.ts    the paid product: receipt/tx → verdict (USDC logs or ETH value)
@@ -185,7 +189,11 @@ npx tsx scripts/smoke.ts   # live loop against real Base data
 Env: `PORT`, `BASE_URL`, `RPC_URLS`, `PRICE_ATOMIC` (default 10000 =
 $0.01), `SCAN_PRICE_ATOMIC` (default 100000 = $1.00), `PAY_TO`
 (`0x696344061b0f4CcFbA0b48a8390330C6b2525531` — the operation's
-receive-only wallet), `FACILITATOR_URL` (unset = in-process facilitator).
+receive-only wallet), `FACILITATOR_URL` (unset = in-process facilitator +
+startup warning: settlement disabled, cannot earn), `CDP_API_KEY_ID` /
+`CDP_API_KEY` (CDP API key pair; with `FACILITATOR_URL` set, the hosted
+facilitator authenticates each call with a freshly minted EdDSA bearer
+JWT — see `.env.example`).
 
 ## Links
 

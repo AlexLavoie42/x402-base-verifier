@@ -32,6 +32,8 @@ const cfg: EndpointConfig = {
   payTo: DEFAULT_PAY_TO as `0x${string}`,
   maxTimeoutSeconds: 30,
   facilitatorUrl: "http://facilitator.invalid", // never contacted: local facilitator injected
+  facilitatorApiKeyId: null,
+  facilitatorApiKey: null,
 };
 
 const PAYER_ADDR = "0x1111111111111111111111111111111111111111";

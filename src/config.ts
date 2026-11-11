@@ -87,6 +87,18 @@ export interface EndpointConfig {
    * src/local-facilitator.ts for why the hosted default doesn't fit).
    */
   facilitatorUrl: string | null;
+  /**
+   * CDP API key id (JWT kid/sub) for authenticating with a hosted facilitator
+   * (env CDP_API_KEY_ID), or null. Only meaningful with facilitatorUrl; the
+   * pair must be set together with CDP_API_KEY.
+   */
+  facilitatorApiKeyId: string | null;
+  /**
+   * CDP API key secret (base64 of 64 bytes: seed || public key; env
+   * CDP_API_KEY), or null. Used to mint the per-request EdDSA bearer JWT —
+   * see src/facilitator-select.ts.
+   */
+  facilitatorApiKey: string | null;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): EndpointConfig {
@@ -104,6 +116,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): EndpointConfig
   if (facilitatorUrl !== null && !/^https?:\/\//.test(facilitatorUrl)) {
     throw new Error("FACILITATOR_URL must be an HTTP(S) URL");
   }
+  const facilitatorApiKeyId = env.CDP_API_KEY_ID?.trim() || null;
+  const facilitatorApiKey = env.CDP_API_KEY?.trim() || null;
+  if ((facilitatorApiKeyId === null) !== (facilitatorApiKey === null)) {
+    throw new Error("CDP_API_KEY and CDP_API_KEY_ID must be set together (the CDP bearer JWT needs both the secret and its key id)");
+  }
+  if (facilitatorApiKey !== null && facilitatorUrl === null) {
+    throw new Error("CDP_API_KEY/CDP_API_KEY_ID only take effect with FACILITATOR_URL — set FACILITATOR_URL too, or unset the CDP vars");
+  }
   return {
     port,
     baseUrl: (env.BASE_URL ?? `http://localhost:${port}`).replace(/\/+$/, ""),
@@ -113,5 +133,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): EndpointConfig
     payTo,
     maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
     facilitatorUrl,
+    facilitatorApiKeyId,
+    facilitatorApiKey,
   };
 }

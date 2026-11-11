@@ -31,6 +31,8 @@ const cfg: EndpointConfig = {
   payTo: DEFAULT_PAY_TO as `0x${string}`,
   maxTimeoutSeconds: 30,
   facilitatorUrl: "http://facilitator.invalid", // library tests never contact a facilitator
+  facilitatorApiKeyId: null,
+  facilitatorApiKey: null,
 };
 const reqs = buildRequirements(cfg, "https://proto.example/verify");
 

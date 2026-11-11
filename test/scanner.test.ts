@@ -349,6 +349,8 @@ const cfg: EndpointConfig = {
   payTo: DEFAULT_PAY_TO as `0x${string}`,
   maxTimeoutSeconds: 30,
   facilitatorUrl: "http://facilitator.invalid", // never contacted: local facilitator injected
+  facilitatorApiKeyId: null,
+  facilitatorApiKey: null,
 };
 
 function fakeVerdictClient(): VerdictClient {
